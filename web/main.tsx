@@ -6,14 +6,16 @@ import './app/globals.css';
 function App() {
   const [state,setState] = useState<'loading'|'login'|'ready'|'error'>('loading');
   const [token,setToken] = useState(''), [error,setError] = useState(''), [busy,setBusy] = useState(false);
+  const [siteSignIn,setSiteSignIn] = useState('');
   const check = async() => {
-    try { const response = await fetch('/api/session'); if (!response.ok) throw new Error('服务无法连接。'); const result = await response.json(); setState(result.authenticated ? 'ready' : 'login'); }
+    try { const response = await fetch('/api/session'); if (!response.ok) throw new Error('服务无法连接。'); const result = await response.json(); setSiteSignIn(result.mode === 'sites' ? result.signInPath : ''); setState(result.authenticated ? 'ready' : 'login'); }
     catch(reason) { setError(reason instanceof Error ? reason.message : '服务无法连接。'); setState('error'); }
   };
   useEffect(() => { void check(); },[]);
   if (state === 'ready') return <Atlas/>;
   if (state === 'loading') return <main className="atlas-access" role="status">正在打开灵枝…</main>;
   if (state === 'error') return <main className="atlas-access"><h1>暂时无法连接</h1><p role="alert">{error}</p><button onClick={() => void check()}>重试</button></main>;
+  if (siteSignIn) return <main className="atlas-access"><h1>LingBranch · 灵枝</h1><p>登录 ChatGPT，打开你的私人灵感画布。</p><a href={siteSignIn} target="_top">登录并打开</a></main>;
   return <main className="atlas-access"><form onSubmit={async event => {
     event.preventDefault(); setBusy(true); setError('');
     try {

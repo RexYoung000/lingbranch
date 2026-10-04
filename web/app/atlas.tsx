@@ -126,6 +126,19 @@ export default function Atlas(){
   const updateLocal=(idea:Idea)=>setData(previous=>previous?{...previous,ideas:previous.ideas.map(item=>item.id===idea.id?idea:item)}:previous);
   const openDetail=(id:string)=>{setGalleryId(null);setSelectedId(id);setDetailOpen(true);const url=new URL(location.href);url.searchParams.set("idea",id);history.replaceState(null,"",url);};
   const closeDetail=()=>{setGalleryId(null);setDetailOpen(false);const url=new URL(location.href);url.searchParams.delete("idea");history.replaceState(null,"",url);};
+  useEffect(()=>{
+    type BrowserTool={name:string;description:string;inputSchema:object;annotations:object;execute:(input:unknown)=>unknown};
+    const context=(document as Document&{modelContext?:{registerTool:(tool:BrowserTool,options:{signal:AbortSignal})=>void|Promise<void>}}).modelContext;
+    if(!context?.registerTool)return;
+    const lifecycle=new AbortController();
+    const read:BrowserTool={name:"read_visible_inspirations",description:"读取当前画布中已加载的灵感标识、标题和标签，不修改资料。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute(input){
+      if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).length)throw new Error("参数必须为空对象。");
+      if(!dataRef.current)throw new Error("画布尚未加载。");
+      return {items:dataRef.current.ideas.map(({id,title,tags,archived,updatedAt})=>({id,title,tags,archived,updatedAt}))};
+    }};
+    try {void Promise.resolve(context.registerTool(read,{signal:lifecycle.signal})).catch(()=>{});}catch {/* Unsupported browsers keep the normal interface. */}
+    return()=>lifecycle.abort();
+  },[]);
   const copyShareLink=async()=>{
     setError("");setNotice("");setShareFeedback(null);
     try{await navigator.clipboard.writeText(shareUrl);setShareFeedback({url:shareUrl,text:"灵感链接已复制，可交给已连接此资料库的 AI 客户端。"});setNotice("灵感链接已复制，可交给已连接此资料库的 AI 客户端。");}

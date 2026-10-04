@@ -53,4 +53,4 @@ MCP 接收上限为 32 MiB，覆盖 20 MiB 文件的 Base64 开销。读取沿 `
 
 HTTP 错误为 `{code,error}`：输入 400、未认证 401、边界拒绝 403、不存在 404、冲突 409、超限 413、存储或原件故障 503。新建和编辑响应含 `outcome`，同时设置 `X-LingBranch-Outcome`。
 
-`/api/tools` 是受保护 JSON 接口，不是远程 MCP 传输端点。首版没有 OAuth、跨域调用或通用远程连接器。
+`/api/tools` 是受保护 JSON 接口，不是远程 MCP 传输端点。本机/自有服务器入口保持上述令牌与 stdio 模型；本 fork 的 Sites 模式新增无状态 `POST /mcp`，使用平台 OAuth、可信用户身份及与网页相同的 13 个工具规则。Sites 网页登录采用平台顶层导航，不接收本机访问令牌。详见 [Sites 工程说明](sites.md)。

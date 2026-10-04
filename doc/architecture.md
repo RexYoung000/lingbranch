@@ -2,6 +2,8 @@
 
 LingBranch 一人一库。网页与本地 AI 进程共用 SQLite 和附件目录；产品行为见 [规格](../spec/local-first-library.md)。
 
+本 fork 的云端路径由 [Sites 工程说明](sites.md) 和 [Sites 规格](../spec/sites-library.md) 描述：网页与认证 HTTP MCP 共用 D1，原件保存于 R2。以下章节继续说明本机/自有服务器路径。
+
 ```mermaid
 flowchart LR
   W[网页 React] --> H[HTTP 入口与访问保护]

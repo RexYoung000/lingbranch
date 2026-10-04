@@ -2,7 +2,15 @@
 
 自己部署，让你和 AI 共同整理灵感。
 
-个人灵感画布，一人一库。网页与用户自己的 AI 客户端操作同一份 SQLite 数据库和附件目录。基础功能不调用大模型 API，不需要维护者的网站账号。
+个人灵感画布，一人一库。网页与用户自己的 AI 客户端操作同一份资料。本机版使用 SQLite 和附件目录；本 fork 增加 Sites 私有部署，使用 D1、R2 与认证 HTTP MCP。基础功能不调用大模型 API。
+
+## Sites 私有部署
+
+保留原卡片画布、标签、搜索、全量列表、连线、归档、附件和完整导出。站点由部署者本人通过 ChatGPT 登录访问，手机与电脑使用同一个固定网址。Sites 配置与实际资料不进入这个公开 fork。
+
+按 [Sites 行为规格](spec/sites-library.md) 和 [Sites 工程说明](doc/sites.md) 构建、发布。远程 `/mcp` 使用平台提供的 OAuth 与 Site 插件，13 个工具和网页共用同一 D1 操作模块；用户连接插件后才能在聊天中操作。无需单独的大模型 API key，也不调用收费 AI 服务。
+
+工程入口：`npm run db:generate` 生成迁移，`npm run build:site` 构建 Worker，`npm run test:site` 验证 D1/R2 与真实 HTTP MCP。本机使用方式继续如下。
 
 ## 本机运行
 
@@ -100,4 +108,4 @@ npm run licenses
 | `spec/`、`doc/` | 当前行为规格与工程依据 |
 | `data/`、`dist/`、`node_modules/` | 本地数据、构建和依赖，不进入 Git |
 
-源码仓库为 [ssdiwu/lingbranch](https://github.com/ssdiwu/lingbranch)，项目采用 [MIT License](LICENSE)，第三方材料保留各自许可与声明。当前版本字段为工程版本，尚未创建版本标签或 GitHub Release，也未部署线上实例。`private: true` 保留用于避免误发布 npm。
+上游为 [ssdiwu/lingbranch](https://github.com/ssdiwu/lingbranch)，本 fork 的 Sites 扩展保留上游 [MIT License](LICENSE) 与第三方许可。具体实例 URL、身份、账号配置和数据只保存在私有部署环境。`private: true` 用于避免误发布 npm。

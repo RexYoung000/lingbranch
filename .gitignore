@@ -32,3 +32,6 @@
 
 # Operating system files
 .DS_Store
+
+# Private Sites runtime and validation state
+/.sites-runtime/

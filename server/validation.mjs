@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { sha256 as digestBytes } from '@noble/hashes/sha2.js';
 
 export class LibraryError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status; }
@@ -14,7 +14,7 @@ export const id = z.string().uuid();
 export const key = z.string().regex(/^[A-Za-z0-9_-]{8,100}$/);
 export const date = z.string().datetime();
 export const coordinate = z.number().finite().min(-1_000_000).max(1_000_000);
-export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+export const sha256 = bytes => Array.from(digestBytes(typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes), b => b.toString(16).padStart(2,'0')).join('');
 export const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const tag = z.string().trim().min(1).max(40);
 export const tags = z.array(tag).max(12).transform(items => [...new Set(items)]);

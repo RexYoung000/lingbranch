@@ -4,6 +4,7 @@
 
 | 问题 | 入口 |
 | --- | --- |
+| Sites 私有部署、D1/R2 与远程 MCP | [Sites 工程说明](sites.md)、[行为规格](../spec/sites-library.md) |
 | 独立版怎样共享资料库、保证保存与恢复 | [运行架构](architecture.md) |
 | 本机及服务器怎样配置 | [运行说明](running.md) |
 | MCP 工具、HTTP、重试与冲突参数 | [接口合同](interfaces.md) |

@@ -8,13 +8,13 @@ LingBranch 源于维护者正在使用的私有灵感库原型。已确认延续
 
 已核对稳定原型提交 `0ce2c80f9b5f5e3eb917316f92a52b3ceaf3db06`，从该提交逐文件提取画布、标签管理、图片查看、布局算法与必要 UI 组件。原始文件路径与 SHA-256 见 [来源清单](source-manifest.json)；算法移植的新增实现见 `server/library.mjs`。未迁入原型配置、身份、OAuth 草稿、凭据、数据、附件、导出包或私人项目标签别名。
 
-依赖已收敛为 React/Vite、必要 UI 依赖与官方 MCP SDK；存储使用 Node.js 内置 SQLite。没有迁入 Sites、Cloudflare、Next、PDF/OCR 运行资源。原型仍由其自己的流程维护，来源工作树不作修改。
+上游独立版使用 React/Vite、必要 UI 与官方 MCP SDK，本机存储为 Node.js SQLite。本 fork 新增 Sites Worker、D1 迁移与 R2 适配，没有读取或迁入原型的站点身份、数据、账号配置或私人资源。原型仍由其自己的流程维护，来源工作树不作修改。扩展边界见 [Sites 工程说明](sites.md)。
 
 ### 第三方清单
 
 `npm run licenses` 从锁文件生成 [依赖许可清单](dependency-licenses.json)，从安装包生成 [第三方声明](../vendor/THIRD-PARTY-NOTICES.txt)。锁文件包含未在本机安装的跨平台可选依赖，它们的许可声明保留在清单中；在目标平台重新安装或制作发布包时，应重新生成其实际声明。
 
-复用的 shadcn UI 组件与样式保留 [MIT 许可](../vendor/shadcn-tailwind-4.13.0.LICENSE.md)，组件许可依据见 [shadcn 官方许可](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md)。当前清单含 MIT、ISC、BSD、Apache、0BSD 以及构建依赖 Lightning CSS 的 MPL-2.0；未修改其源码。依赖声明保留原作者及其适用条款，本项目许可证不替换第三方许可证。
+复用的 shadcn UI 组件与样式保留 [MIT 许可](../vendor/shadcn-tailwind-4.13.0.LICENSE.md)，组件许可依据见 [shadcn 官方许可](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md)。当前自动清单保留 MIT、ISC、BSD、Apache、0BSD、CC0、MPL-2.0，以及新增本地 Worker 开发工具的 LGPL 声明；未修改第三方源码，本地开发工具及其原生二进制不进入部署 Worker。依赖声明保留原作者及其适用条款，本项目许可证不替换第三方许可证。
 
 源码迁入、安装、构建、测试、网页验收与发布分别成立，证据见 [验证记录](verification.md)。
 
