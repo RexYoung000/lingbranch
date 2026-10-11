@@ -17,6 +17,7 @@ export type TagChange = { outcome:'renamed'|'removed'|'unchanged'; affectedCount
 
 // 文件附件区主要列非图片原件；图片进入右侧图文正文，未引用或暂不能预览的仍要有访问入口。
 export const isPreviewableImage = (file:Attachment) => /^image\/(png|jpeg|gif|webp)$/.test(file.mimeType);
+export const isPreviewableVideo = (file:Attachment) => file.mimeType === "video/mp4";
 export const isImage = (file:Attachment) => file.mimeType.startsWith('image/');
 export const attachmentUrl = (id:string) => `/api/attachments/${encodeURIComponent(id)}`;
 export const imageCounts = (idea:Idea) => {

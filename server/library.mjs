@@ -343,12 +343,21 @@ export class Library {
 export function validateFile(metadata,bytes) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length !== metadata.bytes || v.sha256(bytes) !== metadata.sha256) v.fail('integrity_error','附件字节数或 SHA-256 校验不一致。');
   const signature = bytes.subarray(0,16);
+  const mp4Signature = () => {
+    if (bytes.length < 16 || signature.toString('ascii',4,8) !== 'ftyp') return false;
+    const boxSize = bytes.readUInt32BE(0);
+    if (boxSize === 1) {
+      return bytes.length >= 24 && bytes.readBigUInt64BE(8) >= 24n && bytes.readBigUInt64BE(8) <= BigInt(bytes.length);
+    }
+    return boxSize >= 16 && boxSize <= bytes.length;
+  };
   const type = metadata.mimeType;
   const signatures = {
     'image/png':() => signature.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])),
     'image/jpeg':() => signature[0] === 255 && signature[1] === 216 && signature[2] === 255,
     'image/gif':() => /^GIF8[79]a/.test(signature.toString('ascii')),
     'image/webp':() => signature.toString('ascii',0,4) === 'RIFF' && signature.toString('ascii',8,12) === 'WEBP',
+    'video/mp4':mp4Signature,
     'application/pdf':() => signature.toString('ascii',0,5) === '%PDF-',
   };
   if (signatures[type] && !signatures[type]()) v.fail('invalid_input','文件内容与声明的类型不一致。');

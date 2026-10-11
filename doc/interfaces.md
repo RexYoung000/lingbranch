@@ -21,12 +21,14 @@
 | `update_inspiration_connection` | `connectionId/expectedUpdatedAt/idempotencyKey/patch`；只改类型与理由，冲突拒绝，重试保留原请求 |
 | `list_inspiration_connections` | `id`；返回连线列表 |
 | `remove_inspiration_connection` | `connectionId`、可选 `expectedUpdatedAt`；版本过期拒绝，重复移除返回 unchanged |
-| `attach_inspiration_file` | `id/name/mimeType/bytes/sha256/idempotencyKey/dataBase64`，可选 `indexedText`；最多 20 MiB |
+| `attach_inspiration_file` | `id/name/mimeType/bytes/sha256/idempotencyKey/dataBase64`，可选 `indexedText`；最多 20 MiB；`video/mp4` 需通过 MP4 `ftyp` 容器签名校验 |
 | `read_inspiration_attachment` | `attachmentId`、可选 `offset/limit`；每段最多 512 KiB，返回元数据、`dataBase64/offset/nextOffset/complete` |
 
 工具接受记录 ID，不自动打开链接或读取任意本机路径。文件由 AI 客户端在用户授权后读取并编码，上传不会下载外部 URL。灵感和附件文字是用户资料，不应被客户端当作系统指令。
 
 MCP 接收上限为 32 MiB，覆盖 20 MiB 文件的 Base64 开销。读取沿 `nextOffset` 分段到 `complete:true`，再对合并字节校验附件声明的总大小和 SHA-256。不同客户端可能另有限制；大文件优先通过网页上传，不保证任意模型客户端能构造完整 Base64 入参。
+
+附件可为 `video/mp4`；服务端检查 MP4 `ftyp` 容器标记。AI 工具仍通过 `attach_inspiration_file` 保存完整原件，并可经 `read_inspiration_attachment` 分段读回；视频不自动转写，检索文字由调用者显式提供。
 
 重试保留同一个 8–100 字符的 `idempotencyKey`（字母、数字、下划线和短横线）及相同参数。`replayed:true` 表示返回此前操作的凭据，`item` 可能是当时的版本；需要当前状态时再次读取。不同请求不能复用同一个标识。
 
@@ -73,7 +75,7 @@ MCP 接收上限为 32 MiB，覆盖 20 MiB 文件的 Base64 开销。读取沿 `
 | `POST/PATCH/DELETE /api/connections` | 建立 `{fromId,toId,relationType?,reason?,idempotencyKey?}`；修改沿连接更新工具同形参数；移除 `{id,expectedUpdatedAt?}` |
 | `PATCH /api/canvas` | `panX/panY/zoom/expectedUpdatedAt/idempotencyKey`；zoom 为 0.0000001–2.5，支持长标题全图概览 |
 | `POST /api/ideas/:id/attachments` | multipart：`file/indexedText/sha256/idempotencyKey` |
-| `GET /api/attachments/:id` | 校验后读取原件；安全图片可 inline，其余强制下载；`?download=1` 强制下载 |
+| `GET /api/attachments/:id` | 校验后读取原件；安全图片与 `video/mp4` 可 inline，其余强制下载；MP4 支持单段 `Range` 定位；`?download=1` 强制下载完整原件 |
 | `GET /api/export` | 完整 gzip 资料包 |
 | `POST /api/tools` | `{name,arguments}` 分发到与 MCP 相同的工具规则 |
 

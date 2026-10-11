@@ -25,7 +25,7 @@ export const toolDefinitions = {
     // 只限制传输分段；每次仍验证完整原件，避免把损坏文件分段报告为成功。
     return {attachment:metadata,dataBase64:bytes.subarray(args.offset,end).toString('base64'),offset:args.offset,nextOffset:complete?null:end,complete};
   }},
-  attach_inspiration_file:{description:'把完整 base64 原件保存到灵感。最多 20 MiB，必须提供实际 bytes、sha256 与稳定 idempotencyKey。不下载远程文件。',schema:v.attachmentInput.extend({dataBase64:z.string().min(4).max(Math.ceil(v.MAX_ATTACHMENT_BYTES/3)*4)}),run:async(db,args) => {
+  attach_inspiration_file:{description:'把完整 base64 原件保存到灵感。最多 20 MiB，必须提供实际 bytes、sha256 与稳定 idempotencyKey。不下载远程文件。video/mp4 会校验 MP4 ftyp 容器签名；视频不自动转写。',schema:v.attachmentInput.extend({dataBase64:z.string().min(4).max(Math.ceil(v.MAX_ATTACHMENT_BYTES/3)*4)}),run:async(db,args) => {
     const {dataBase64,...metadata} = args;
     const bytes = Buffer.from(dataBase64,'base64');
     if (bytes.toString('base64') !== dataBase64) v.fail('invalid_input','base64 格式无效。');
