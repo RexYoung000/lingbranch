@@ -13,7 +13,7 @@ import { imageCounts, isPreviewableImage, isImage } from "@/lib/idea-store";
 import { inspirationUrl } from "@/lib/inspiration-links";
 import { attachmentUrl } from "@/lib/idea-store";
 import titleGuidance from "@/lib/inspiration-title-guidance.json" with { type: "json" };
-import { applyViewPositions, defaultCardSize, filterIdeas, fitCanvasView, viewTagCounts, visibleConnections, type ViewPositions } from "@/lib/atlas-view";
+import { applyViewPositions, defaultCardSize, filterIdeas, fitCanvasView, wheelCanvasView, viewTagCounts, visibleConnections, type ViewPositions } from "@/lib/atlas-view";
 import { canonicalInspirationTag, inspirationTagHint } from "@/lib/inspiration-tags";
 import ImageGallery from "./image-gallery";
 import type { DraftImage, BodyEditorHandle } from "./body-editor";
@@ -112,10 +112,13 @@ export default function Atlas(){
     }).catch(reason=>setError(reason instanceof Error?reason.message:"视野保存失败，请刷新后重试。"));},700);return()=>clearTimeout(timer);},[transform,temporaryView]);
   useEffect(()=>{
     const surface=canvasRef.current;if(!surface)return;
-    const wheel=(event:WheelEvent)=>{if(event.target instanceof Element&&event.target.closest(".atlas-basis,.atlas-connection-panel"))return;event.preventDefault();const current=transformRef.current;if(event.ctrlKey||event.metaKey){
-      const rect=surface.getBoundingClientRect(),cx=event.clientX-rect.left,cy=event.clientY-rect.top,zoom=Math.max(MIN_CANVAS_ZOOM,Math.min(2.5,current.zoom*Math.exp(-event.deltaY*.006)));
-      setUserTransform({panX:cx-(cx-current.panX)*zoom/current.zoom,panY:cy-(cy-current.panY)*zoom/current.zoom,zoom});
-    }else setUserTransform({...current,panX:current.panX-event.deltaX,panY:current.panY-event.deltaY});};
+    const wheel=(event:WheelEvent)=>{
+      if(event.target instanceof Element&&event.target.closest(".atlas-basis,.atlas-connection-panel,.atlas-mobile-results"))return;
+      event.preventDefault();
+      const next=wheelCanvasView(transformRef.current,event,surface.getBoundingClientRect());
+      if(next===transformRef.current)return;
+      transformRef.current=next;setUserTransform(next);
+    };
     surface.addEventListener("wheel",wheel,{passive:false});return()=>surface.removeEventListener("wheel",wheel);
   },[temporaryView]);
 
@@ -336,7 +339,7 @@ export default function Atlas(){
     <header className="atlas-topbar"><div className="atlas-brand"><span className="atlas-brandmark"><Sparkles size={19}/></span><span>灵枝</span><span className="atlas-private">个人资料库</span></div><label className="atlas-search"><Search size={18}/><Input value={query} onChange={event=>changeFilter(selectedTag,event.target.value,archiveView,compactView)} placeholder="搜索灵感、标签、文件与来源" aria-label="搜索灵感"/></label><Button variant="outline" size="icon" aria-label="刷新资料库" title="读取网页与 AI 的最新保存" onClick={()=>void reload()}><RotateCcw size={18}/></Button><Button variant="outline" size="icon" aria-label="全量列表" title="全量列表（含归档）" onClick={()=>setAllOpen(true)}><List size={18}/></Button><Button variant="outline" size="icon" aria-label="管理标签" title="管理标签" onClick={()=>setTagManagerOpen(true)}><Tags size={18}/></Button><Button onClick={startNew} className="atlas-create" aria-label="新建灵感"><Plus size={17}/><span>新建灵感</span></Button></header>
     <div className="atlas-body"><aside className="atlas-rail" aria-label="灵感导航"><div className="atlas-rail-title">空间</div><button className={!archiveView?"atlas-nav-active":"atlas-nav-muted"} onClick={()=>changeFilter("","",false,false)}><Network size={18}/> 关系画布</button><button className={archiveView?"atlas-nav-active":"atlas-nav-muted"} onClick={()=>changeFilter("","",true,false)}><Archive size={18}/> 已归档</button><button className="atlas-nav-muted" onClick={()=>setTagManagerOpen(true)}><Tags size={18}/> 管理标签</button><div className="atlas-rail-tags" aria-label="按标签筛选"><div className="atlas-rail-title">标签 · {archiveView?"归档":"画布"}</div>{tagCounts.map(tag=><button key={tag.name} aria-label={`筛选标签：${tag.name}`} aria-pressed={selectedTag===tag.name} className={selectedTag===tag.name?"is-selected":""} onClick={()=>changeFilter(selectedTag===tag.name?"":tag.name,query,archiveView,selectedTag!==tag.name)}><span>{tag.name}</span><span>{tag.count}</span></button>)}</div>{(query||selectedTag)&&<div className="atlas-results"><div className="atlas-rail-title">搜索结果 · {activeIdeas.length}</div>{activeIdeas.slice(0,30).map(idea=><button key={idea.id} onClick={()=>{centerOn(idea);openDetail(idea.id);}}>{idea.title}</button>)}</div>}<div className="atlas-rail-foot"><Button variant="ghost" size="sm" onClick={()=>void exportData()}><ArrowDownToLine size={16}/> 导出全部资料</Button><p>原件与画布资料一起导出</p></div></aside>
       <section className="atlas-canvas-shell"><header className="atlas-graph-header"><div className="atlas-canvas-heading"><span>{query.trim()?"搜索结果":selectedTag?"标签筛选":archiveView?"已归档":"关系画布"}</span><span>{loading?"正在读取…":!data?"读取未完成":`${viewIdeas.length} 个节点 · ${shownConnections.length} 条已保存关联`}</span><Button variant="outline" size="sm" aria-expanded={basisOpen} aria-controls="atlas-basis" onClick={()=>{setBasisOpen(!basisOpen);if(basisOpen)setTopicTag("");}}>聚合依据</Button>{selectedTag&&<button className="atlas-selected-tag" onClick={()=>changeFilter("",query,archiveView,false)} aria-label="清除标签筛选">{selectedTag}<X size={13}/></button>}{temporaryView&&activeIdeas.length>0&&<><Button variant="outline" size="sm" aria-pressed={compactView} onClick={()=>{setCompactView(!compactView);setViewPositions({});setLinkFrom(null);}}>{compactView?"切回原位置":"临时聚合"}</Button><span className="atlas-view-note">拖动仅调整当前视图</span></>}</div>
-        <p className="atlas-graph-hint" id="atlas-graph-hint">实线：点选查看类型与理由 · 虚线：选中点的同标签提示，未保存为关联 · 点选展开卡片，再打开详情</p>
+        <p className="atlas-graph-hint" id="atlas-graph-hint">滚轮缩放 · 拖拽空白平移 · 实线：点选查看类型与理由 · 虚线：选中点的同标签提示，未保存为关联 · 点选展开卡片，再打开详情</p>
 </header><main ref={canvasRef} className="atlas-canvas" aria-busy={loading} tabIndex={-1} aria-label="关系画布" aria-describedby="atlas-graph-hint" onPointerDown={onCanvasDown} onPointerMove={onCanvasMove} onPointerUp={()=>{panRef.current=null;}} onPointerCancel={()=>{panRef.current=null;}}>
                 {(neighborhoodOnly||highlightId)&&<div className="atlas-neighborhood-tools"><span>{Math.max(0,neighbors.size-1)} 条直接关联</span><Button variant={neighborhoodOnly?"default":"outline"} size="sm" onClick={toggleNeighborhood} aria-pressed={neighborhoodOnly}>{neighborhoodOnly?"返回全部节点":"只看直接关联"}</Button></div>}
         {(query||selectedTag)&&activeIdeas.length>0&&<details className="atlas-mobile-results" aria-label="搜索结果"><summary>查看结果列表</summary>{activeIdeas.slice(0,30).map(idea=><button key={idea.id} onClick={()=>{centerOn(idea);openDetail(idea.id);}}>{idea.title}</button>)}</details>}

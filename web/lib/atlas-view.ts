@@ -7,6 +7,19 @@ export type ViewportSize = { width: number; height: number };
 export type ViewPositions = Record<string, { x: number; y: number }>;
 export const defaultCardSize: CardSize = NODE_SIZE;
 
+// Keep the world point under the pointer fixed, including off-centre canvases.
+export function wheelCanvasView(current: CanvasState,
+  event: Pick<WheelEvent, "clientX" | "clientY" | "deltaY" | "deltaMode">,
+  viewport: Pick<DOMRect, "left" | "top" | "height">): CanvasState {
+  if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return current;
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.height : 1;
+  const zoom = Math.max(MIN_CANVAS_ZOOM, Math.min(2.5, current.zoom * Math.exp(-event.deltaY * unit * .002)));
+  if (zoom === current.zoom) return current;
+  const x = event.clientX - viewport.left, y = event.clientY - viewport.top;
+  const ratio = zoom / current.zoom;
+  return {panX: x - (x - current.panX) * ratio, panY: y - (y - current.panY) * ratio, zoom};
+}
+
 export function matchesIdea(idea: Idea, query: string): boolean {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if(!terms.length)return true;
