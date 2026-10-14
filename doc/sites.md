@@ -1,6 +1,6 @@
 # Sites 工程说明
 
-行为合同见 [Sites 私有资料库](../spec/sites-library.md)。本扩展沿用上游关系画布与图文正文，保留本机 Node/SQLite/stdio 入口；`worker/` 为 Cloudflare Workers 后端。
+行为合同见 [Sites 私有资料库](../spec/sites-library.md)。本扩展沿用上游关系画布、卡片浏览与图文正文，保留本机 Node/SQLite/stdio 入口；`worker/` 为 Cloudflare Workers 后端。
 
 ## 构建与发布
 
