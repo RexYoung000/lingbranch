@@ -7,6 +7,11 @@ export type ViewportSize = { width: number; height: number };
 export type ViewPositions = Record<string, { x: number; y: number }>;
 export const defaultCardSize: CardSize = NODE_SIZE;
 
+// 移动节点也会更新 updatedAt；浏览排序只依据新建时间，不跟着布局操作跳动。
+export function cardBrowseIdeas(ideas: Idea[]): Idea[] {
+  return [...ideas].sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||a.id.localeCompare(b.id));
+}
+
 // Keep the world point under the pointer fixed, including off-centre canvases.
 export function wheelCanvasView(current: CanvasState,
   event: Pick<WheelEvent, "clientX" | "clientY" | "deltaY" | "deltaMode">,
