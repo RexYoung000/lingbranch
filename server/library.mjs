@@ -5,22 +5,14 @@ import { open, readFile, rename, unlink, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import * as v from './validation.mjs';
+import * as md from './markdown.mjs';
+import {freeNodePosition} from '../shared/relationship-layout.mjs';
+import {layoutSchema} from '../shared/layout-request.mjs';
+import {CONNECTION_EPOCH,connectionFromRow,connectionCreateSchema,connectionUpdateSchema} from '../shared/connection-model.mjs';
 
-const epoch = '1970-01-01T00:00:00.000Z';
+const epoch = CONNECTION_EPOCH;
 const nextDate = previous => new Date(Math.max(Date.now(), Date.parse(previous || epoch) + 1)).toISOString();
-const cardWidth = 324, cardHeight = 420;
-
-// Ported from the pinned prototype: a new card never moves an existing card.
-function freePosition(preferred, occupied) {
-  const dx = preferred.x > 1_000_000 - 3 * cardWidth ? -1 : 1;
-  const dy = preferred.y > 0 ? -1 : 1;
-  for (let n = 0; n <= occupied.length * 9 + 4; n++) {
-    const point = {x:preferred.x + dx * (n % 4) * cardWidth, y:preferred.y + dy * Math.floor(n / 4) * cardHeight};
-    if (Math.abs(point.x) > 1_000_000 || Math.abs(point.y) > 1_000_000) continue;
-    if (!occupied.some(other => Math.abs(point.x - other.x) < cardWidth && Math.abs(point.y - other.y) < cardHeight)) return point;
-  }
-  v.fail('conflict', '附近没有空位，请选择另一个位置。', 409);
-}
+function freePosition(preferred,occupied){try{return freeNodePosition(preferred,occupied);}catch{v.fail('conflict','附近没有空位，请选择另一个位置。',409);}}
 
 export class Library {
   constructor(directory) {
@@ -30,7 +22,8 @@ export class Library {
     this.db = new DatabaseSync(join(this.directory, 'library.sqlite'), {timeout:5000});
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 1) { this.db.close(); throw new Error('资料库版本较新，请使用匹配的 LingBranch 版本。'); }
+    if (version > 3) { this.db.close(); throw new Error('资料库版本较新，请使用匹配的 LingBranch 版本。'); }
+    try {
     if (version === 0) this.transaction(() => {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS ideas (
@@ -59,6 +52,16 @@ export class Library {
         PRAGMA user_version=1;
       `);
     });
+    // v1 → v2：只新增可选格式列。旧正文逐字保留，不重新解释其中的 Markdown 符号。
+    if (version < 2) this.transaction(() => {
+      this.db.exec("ALTER TABLE ideas ADD COLUMN body_format TEXT NOT NULL DEFAULT 'plain' CHECK(body_format IN ('plain','markdown')); PRAGMA user_version=2;");
+    });
+    if (version < 3) this.transaction(() => {
+      this.db.exec(`ALTER TABLE connections ADD COLUMN relation_type TEXT NOT NULL DEFAULT 'related' CHECK(relation_type IN ('related','workflow','example','application','extension'));
+        ALTER TABLE connections ADD COLUMN reason TEXT NOT NULL DEFAULT '' CHECK(length(reason)<=500);
+        ALTER TABLE connections ADD COLUMN updated_at TEXT NOT NULL DEFAULT '${epoch}'; PRAGMA user_version=3;`);
+    });
+    } catch (error) { this.db.close(); throw error; }
   }
   close() { this.db.close(); }
   transaction(action, write = true) {
@@ -72,7 +75,7 @@ export class Library {
     if (!row) return {hash};
     if (row.hash !== hash) v.fail('conflict', '该重试标识已用于不同操作或内容，请读取已保存结果。', 409);
     const result = JSON.parse(row.result);
-    return {hash, result:{...result, replayed:true, outcome:result.outcome === 'created' ? (kind === 'attachment' ? 'already_attached' : 'already_saved') : result.outcome}};
+    return {hash, result:{...result, replayed:true, outcome:result.outcome === 'created' ? (kind === 'attachment' ? 'already_attached' : kind === 'connection-create' ? 'already_connected' : 'already_saved') : result.outcome}};
   }
   mutate(kind, input, action) {
     return this.transaction(() => {
@@ -88,10 +91,20 @@ export class Library {
       indexedText:row.indexed_text, sha256:row.sha256, createdAt:row.created_at};
   }
   ideaFrom(row) {
-    return {id:row.id, title:row.title, body:row.body, sourceLabel:row.source_label, sourceUrl:row.source_url,
+    const attachments = this.db.prepare('SELECT * FROM attachments WHERE idea_id=? ORDER BY created_at,id').all(row.id).map(file => this.attachmentFrom(file));
+    const bodyFormat = md.normalizeFormat(row.body_format);
+    return {id:row.id, title:row.title, body:row.body, bodyFormat,
+      summary:md.readableSummary(row.body, bodyFormat),
+      bodyImages:bodyFormat === 'markdown' ? md.resolveBodyImages(row.body, attachments) : [],
+      sourceLabel:row.source_label, sourceUrl:row.source_url,
       sourceAt:row.source_at, tags:JSON.parse(row.tags_json), x:row.x, y:row.y, archived:!!row.archived,
-      createdAt:row.created_at, updatedAt:row.updated_at,
-      attachments:this.db.prepare('SELECT * FROM attachments WHERE idea_id=? ORDER BY created_at,id').all(row.id).map(file => this.attachmentFrom(file))};
+      createdAt:row.created_at, updatedAt:row.updated_at, attachments};
+  }
+  // 正文中的永久引用必须在原件已保存、已索引之后提交。
+  assertBodyReferences(id, body, bodyFormat) {
+    if (bodyFormat !== 'markdown') return [];
+    const attachments = this.db.prepare('SELECT * FROM attachments WHERE idea_id=?').all(id).map(file => this.attachmentFrom(file));
+    return md.resolveBodyImages(body, attachments);
   }
   readIdea(value) {
     const id = v.parse(v.id, value);
@@ -104,7 +117,7 @@ export class Library {
     return {panX:row.pan_x, panY:row.pan_y, zoom:row.zoom, updatedAt:row.updated_at};
   }
   connections() {
-    return this.db.prepare('SELECT id,from_id AS fromId,to_id AS toId FROM connections ORDER BY id').all();
+    return this.db.prepare('SELECT * FROM connections ORDER BY id').all().map(connectionFromRow);
   }
   atlas() {
     return this.transaction(() => ({ideas:this.db.prepare('SELECT * FROM ideas ORDER BY seq').all().map(row => this.ideaFrom(row)),
@@ -113,10 +126,12 @@ export class Library {
   createIdea(value) {
     const input = v.parse(v.create, value);
     return this.mutate('create', input, () => {
-      const position = freePosition(input, this.db.prepare('SELECT x,y FROM ideas').all());
+      const position = freePosition(input, this.db.prepare('SELECT x,y,title FROM ideas').all());
       const id = randomUUID(), now = nextDate();
-      this.db.prepare(`INSERT INTO ideas(id,title,body,source_label,source_url,source_at,tags_json,x,y,archived,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,0,?,?)`).run(id,input.title,input.body,input.sourceLabel,input.sourceUrl,input.sourceAt,JSON.stringify(input.tags),position.x,position.y,now,now);
+      const bodyFormat = md.normalizeFormat(input.bodyFormat);
+      this.assertBodyReferences(id, input.body, bodyFormat);
+      this.db.prepare(`INSERT INTO ideas(id,title,body,body_format,source_label,source_url,source_at,tags_json,x,y,archived,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)`).run(id,input.title,input.body,bodyFormat,input.sourceLabel,input.sourceUrl,input.sourceAt,JSON.stringify(input.tags),position.x,position.y,now,now);
       return {outcome:'created', item:this.readIdea(id)};
     });
   }
@@ -129,9 +144,32 @@ export class Library {
       const changed = Object.entries(input.patch).some(([key, value]) => v.fingerprint(value) !== v.fingerprint(current[key]));
       if (!changed) return {outcome:'unchanged', item:current};
       const next = {...current, ...input.patch};
-      this.db.prepare(`UPDATE ideas SET title=?,body=?,source_label=?,source_url=?,source_at=?,tags_json=?,x=?,y=?,archived=?,updated_at=? WHERE id=?`)
-        .run(next.title,next.body,next.sourceLabel,next.sourceUrl,next.sourceAt,JSON.stringify(next.tags),next.x,next.y,Number(next.archived),nextDate(current.updatedAt),input.id);
+      const bodyFormat = md.normalizeFormat(next.bodyFormat);
+      this.assertBodyReferences(input.id, next.body, bodyFormat);
+      this.db.prepare(`UPDATE ideas SET title=?,body=?,body_format=?,source_label=?,source_url=?,source_at=?,tags_json=?,x=?,y=?,archived=?,updated_at=? WHERE id=?`)
+        .run(next.title,next.body,bodyFormat,next.sourceLabel,next.sourceUrl,next.sourceAt,JSON.stringify(next.tags),next.x,next.y,Number(next.archived),nextDate(current.updatedAt),input.id);
       return {outcome:'updated', item:this.readIdea(input.id)};
+    });
+  }
+  arrangeIdeas(value) {
+    const input=v.parse(layoutSchema,value);
+    return this.mutate('layout',input,()=>{
+      // Read every version before the first write. The saved receipt is also
+      // the original-position backup; a failed transaction preserves both.
+      const current=input.positions.map(point=>{
+        const row=this.db.prepare('SELECT id,x,y,updated_at FROM ideas WHERE id=?').get(point.id);
+        if(!row)v.fail('not_found','整理中的灵感不存在。',404);
+        if(row.updated_at!==point.expectedUpdatedAt)v.fail('conflict','灵感已被修改，整批位置未保存。请刷新后重新整理。',409);
+        return row;
+      });
+      const positions=input.positions.map((point,index)=>{
+        const row=current[index], changed=row.x!==point.x||row.y!==point.y;
+        const updatedAt=changed?nextDate(row.updated_at):row.updated_at;
+        if(changed)this.db.prepare('UPDATE ideas SET x=?,y=?,updated_at=? WHERE id=?').run(point.x,point.y,updatedAt,point.id);
+        return {id:point.id,x:point.x,y:point.y,updatedAt};
+      });
+      return {outcome:positions.some((point,index)=>point.updatedAt!==current[index].updated_at)?'updated':'unchanged',positions,
+        previous:current.map((row,index)=>({id:row.id,x:row.x,y:row.y,expectedUpdatedAt:positions[index].updatedAt}))};
     });
   }
   listIdeas(value = {}) {
@@ -154,7 +192,9 @@ export class Library {
         if (input.tag && !tags.includes(input.tag)) return false;
         if (!terms.length) return true;
         const files = this.db.prepare('SELECT name,indexed_text FROM attachments WHERE idea_id=?').all(row.id);
-        const text = [row.title,row.body,row.source_label,row.source_url,...tags,...files.flatMap(f => [f.name,f.indexed_text])].join(' ').toLocaleLowerCase();
+        // 检索口径与网页一致：Markdown 正文按可读文字匹配，不把渲染标记或引用标识当作用户内容。
+        const bodyText = md.readableSummary(row.body, md.normalizeFormat(row.body_format), 1_000_000);
+        const text = [row.title,bodyText,row.source_label,row.source_url,...tags,...files.flatMap(f => [f.name,f.indexed_text])].join(' ').toLocaleLowerCase();
         return terms.every(term => text.includes(term));
       });
       const remaining = rows.filter(row => row.seq > after), selected = remaining.slice(0,input.limit);
@@ -192,27 +232,51 @@ export class Library {
       return {outcome:affectedItems.length ? (remove ? 'removed' : 'renamed') : 'unchanged', affectedCount:affectedItems.length,affectedItems};
     });
   }
+  readConnection(value) {
+    const id=v.parse(v.id,value),row=this.db.prepare('SELECT * FROM connections WHERE id=?').get(id);
+    if(!row)v.fail('not_found','没有找到这条关联。',404);
+    return connectionFromRow(row);
+  }
   connect(value) {
-    const input = v.parse(z.object({fromId:v.id,toId:v.id}).strict(),value);
-    if (input.fromId === input.toId) v.fail('invalid_input','请选择两条不同的灵感。');
-    return this.transaction(() => {
-      if (this.readIdea(input.fromId).archived || this.readIdea(input.toId).archived) v.fail('invalid_input','只能连接未归档灵感。');
-      const [from,to] = [input.fromId,input.toId].sort();
-      const existing = this.db.prepare('SELECT id,from_id AS fromId,to_id AS toId FROM connections WHERE from_id=? AND to_id=?').get(from,to);
-      if (existing) return {outcome:'already_connected', connection:existing};
-      const connection = {id:randomUUID(),fromId:from,toId:to};
-      this.db.prepare('INSERT INTO connections VALUES(?,?,?)').run(connection.id,from,to);
+    const parsed=v.parse(connectionCreateSchema,value);
+    if(parsed.fromId===parsed.toId)v.fail('invalid_input','请选择两条不同的灵感。');
+    const [fromId,toId]=[parsed.fromId,parsed.toId].sort(),input={...parsed,fromId,toId};
+    const create=()=>{
+      if(this.readIdea(fromId).archived||this.readIdea(toId).archived)v.fail('invalid_input','只能连接未归档灵感。');
+      const row=this.db.prepare('SELECT * FROM connections WHERE from_id=? AND to_id=?').get(fromId,toId);
+      if(row){
+        const connection=connectionFromRow(row);
+        if(input.relationType!==undefined&&input.relationType!==connection.relationType||input.reason!==undefined&&input.reason!==connection.reason)v.fail('conflict','关联已存在且说明不同，请读取其版本后修改说明。',409);
+        return {outcome:'already_connected',connection};
+      }
+      const connection={id:randomUUID(),fromId,toId,relationType:input.relationType??'related',reason:input.reason??'',updatedAt:nextDate()};
+      this.db.prepare('INSERT INTO connections(id,from_id,to_id,relation_type,reason,updated_at) VALUES(?,?,?,?,?,?)').run(connection.id,fromId,toId,connection.relationType,connection.reason,connection.updatedAt);
       return {outcome:'created',connection};
+    };
+    return input.idempotencyKey?this.mutate('connection-create',input,create):this.transaction(create);
+  }
+  updateConnection(value) {
+    const input=v.parse(connectionUpdateSchema,value);
+    return this.mutate('connection-update',input,()=>{
+      const current=this.readConnection(input.connectionId);
+      if(current.updatedAt!==input.expectedUpdatedAt)v.fail('conflict','关系说明已被其他入口修改，请重新读取后对比。',409);
+      const next={...current,...input.patch};
+      if(next.relationType===current.relationType&&next.reason===current.reason)return {outcome:'unchanged',connection:current};
+      next.updatedAt=nextDate(current.updatedAt);
+      this.db.prepare('UPDATE connections SET relation_type=?,reason=?,updated_at=? WHERE id=? AND updated_at=?').run(next.relationType,next.reason,next.updatedAt,next.id,current.updatedAt);
+      return {outcome:'updated',connection:next};
     });
   }
-  listConnections(id) {
-    this.readIdea(id);
-    return this.connections().filter(link => link.fromId === id || link.toId === id);
-  }
-  removeConnection(value) {
-    const id = v.parse(v.id,value);
-    const result = this.db.prepare('DELETE FROM connections WHERE id=?').run(id);
-    return {outcome:result.changes ? 'removed' : 'unchanged',connectionId:id};
+  listConnections(id) { this.readIdea(id); return this.connections().filter(link=>link.fromId===id||link.toId===id); }
+  removeConnection(value,expectedUpdatedAt) {
+    const id=v.parse(v.id,value);if(expectedUpdatedAt!==undefined)v.parse(v.date,expectedUpdatedAt);
+    return this.transaction(()=>{
+      const row=this.db.prepare('SELECT * FROM connections WHERE id=?').get(id);
+      if(!row)return {outcome:'unchanged',connectionId:id};
+      if(expectedUpdatedAt!==undefined&&row.updated_at!==expectedUpdatedAt)v.fail('conflict','关系说明已更新，请读取最新版本后再移除。',409);
+      this.db.prepare('DELETE FROM connections WHERE id=?').run(id);
+      return {outcome:'removed',connectionId:id};
+    });
   }
   saveCanvas(value) {
     const input = v.parse(v.canvas,value);
@@ -278,13 +342,23 @@ export class Library {
 
 export function validateFile(metadata,bytes) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length !== metadata.bytes || v.sha256(bytes) !== metadata.sha256) v.fail('integrity_error','附件字节数或 SHA-256 校验不一致。');
-  const signature = Buffer.from(bytes.subarray(0,16));
+  bytes = Buffer.from(bytes);
+  const signature = bytes.subarray(0,16);
+  const mp4Signature = () => {
+    if (bytes.length < 16 || signature.toString('ascii',4,8) !== 'ftyp') return false;
+    const boxSize = bytes.readUInt32BE(0);
+    if (boxSize === 1) {
+      return bytes.length >= 24 && bytes.readBigUInt64BE(8) >= 24n && bytes.readBigUInt64BE(8) <= BigInt(bytes.length);
+    }
+    return boxSize >= 16 && boxSize <= bytes.length;
+  };
   const type = metadata.mimeType;
   const signatures = {
     'image/png':() => signature.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])),
     'image/jpeg':() => signature[0] === 255 && signature[1] === 216 && signature[2] === 255,
     'image/gif':() => /^GIF8[79]a/.test(signature.toString('ascii')),
     'image/webp':() => signature.toString('ascii',0,4) === 'RIFF' && signature.toString('ascii',8,12) === 'WEBP',
+    'video/mp4':mp4Signature,
     'application/pdf':() => signature.toString('ascii',0,5) === '%PDF-',
   };
   if (signatures[type] && !signatures[type]()) v.fail('invalid_input','文件内容与声明的类型不一致。');

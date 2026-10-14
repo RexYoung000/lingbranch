@@ -1,13 +1,30 @@
 import type { CanvasState, Connection, Idea } from "@/lib/idea-store";
+import { markdownText } from '../../shared/markdown.mjs';
+import {NODE_SIZE,nodeLayoutBounds,freeNodePosition,READING_ZOOM,MIN_CANVAS_ZOOM} from '../../shared/relationship-layout.mjs';
 
 export type CardSize = { width: number; height: number };
 export type ViewportSize = { width: number; height: number };
 export type ViewPositions = Record<string, { x: number; y: number }>;
-export const defaultCardSize: CardSize = { width: 300, height: 420 };
+export const defaultCardSize: CardSize = NODE_SIZE;
+
+// Keep the world point under the pointer fixed, including off-centre canvases.
+export function wheelCanvasView(current: CanvasState,
+  event: Pick<WheelEvent, "clientX" | "clientY" | "deltaY" | "deltaMode">,
+  viewport: Pick<DOMRect, "left" | "top" | "height">): CanvasState {
+  if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return current;
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.height : 1;
+  const zoom = Math.max(MIN_CANVAS_ZOOM, Math.min(2.5, current.zoom * Math.exp(-event.deltaY * unit * .002)));
+  if (zoom === current.zoom) return current;
+  const x = event.clientX - viewport.left, y = event.clientY - viewport.top;
+  const ratio = zoom / current.zoom;
+  return {panX: x - (x - current.panX) * ratio, panY: y - (y - current.panY) * ratio, zoom};
+}
 
 export function matchesIdea(idea: Idea, query: string): boolean {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const text = [idea.title, idea.body, idea.sourceLabel, idea.sourceUrl, ...idea.tags,
+  if(!terms.length)return true;
+  const body=idea.bodyFormat==='markdown'?markdownText(idea.body).replace(/\s+/g,' ').trim():idea.body;
+  const text = [idea.title, body, idea.sourceLabel, idea.sourceUrl, ...idea.tags,
     ...idea.attachments.flatMap(file => [file.name, file.indexedText])].join(" ").toLocaleLowerCase();
   return terms.every(term => text.includes(term));
 }
@@ -29,38 +46,25 @@ export function visibleConnections(connections: Connection[], ideas: Idea[]): Co
   const ids = new Set(ideas.map(idea => idea.id));
   return connections.filter(link => ids.has(link.fromId) && ids.has(link.toId));
 }
-export function compactIdeas(ideas: Idea[], viewport: ViewportSize, size: CardSize): Idea[] {
-  if (!ideas.length) return [];
-  const width = size.width + 24, height = size.height + 28;
-  const ratio = Math.max(1, viewport.width - 64) / Math.max(1, viewport.height - 168);
-  const columns = Math.max(1, Math.min(ideas.length, Math.ceil(Math.sqrt(ideas.length * ratio * height / width))));
-  return ideas.map((idea, index) => ({ ...idea, x: index % columns * width, y: Math.floor(index / columns) * height }));
-}
-export function freeViewPosition(preferred: { x: number; y: number }, occupied: { x: number; y: number }[], size: CardSize): { x: number; y: number } {
-  const width = size.width + 24, height = size.height + 28;
-  const x = Math.max(-900_000, Math.min(900_000, preferred.x)), y = Math.max(-900_000, Math.min(900_000, preferred.y));
-  for (let index = 0; index <= occupied.length * 9 + 4; index++) {
-    const point = { x: x + index % 4 * width, y: y + Math.floor(index / 4) * height };
-    if (!occupied.some(other => Math.abs(point.x - other.x) < width && Math.abs(point.y - other.y) < height)) return point;
-  }
-  throw new Error("当前视图附近没有空位，请换一个位置。");
+export function freeViewPosition(preferred: { x: number; y: number;title?:string }, occupied: { x: number; y: number;title?:string }[], size: CardSize): { x: number; y: number } {
+  return freeNodePosition(preferred,occupied);
 }
 export function applyViewPositions(ideas: Idea[], positions: ViewPositions, size: CardSize): Idea[] {
   // Leave unmodified cards fixed. Resolve local drags against them, including
-  // changed card measurements after resize; never mutate the persisted ideas.
-  const occupied = ideas.filter(idea => !positions[idea.id]).map(idea => ({ x: idea.x, y: idea.y }));
+  // the node hit area; never mutate the persisted ideas.
+  const occupied = ideas.filter(idea => !positions[idea.id]).map(idea => ({ x: idea.x, y: idea.y,title:idea.title }));
   return ideas.map(idea => {
     if (!positions[idea.id]) return idea;
-    const point = freeViewPosition(positions[idea.id], occupied, size);
-    occupied.push(point);
+    const point = freeViewPosition({...positions[idea.id],title:idea.title}, occupied, size);
+    occupied.push({...point,title:idea.title});
     return { ...idea, ...point };
   });
 }
-export function fitCanvasView(ideas: Idea[], viewport: ViewportSize, size: CardSize): CanvasState | null {
+export function fitCanvasView(ideas: Idea[], viewport: ViewportSize, size: CardSize,minimumZoom=READING_ZOOM): CanvasState | null {
   if (!ideas.length || viewport.width <= 0 || viewport.height <= 0) return null;
-  const minX = Math.min(...ideas.map(idea => idea.x)), minY = Math.min(...ideas.map(idea => idea.y));
-  const maxX = Math.max(...ideas.map(idea => idea.x + size.width)), maxY = Math.max(...ideas.map(idea => idea.y + size.height));
+  const bounds=ideas.map(nodeLayoutBounds);
+  const minX=Math.min(...bounds.map(b=>b.left)),minY=Math.min(...bounds.map(b=>b.top)),maxX=Math.max(...bounds.map(b=>b.right)),maxY=Math.max(...bounds.map(b=>b.bottom));
   const width = Math.max(1, viewport.width - 64), height = Math.max(1, viewport.height - 168);
-  const zoom = Math.max(.05, Math.min(1, width / (maxX - minX), height / (maxY - minY)));
+  const zoom = Math.max(Math.max(MIN_CANVAS_ZOOM,minimumZoom), Math.min(1, width / (maxX - minX), height / (maxY - minY)));
   return { zoom, panX: viewport.width / 2 - (minX + maxX) / 2 * zoom, panY: 96 + height / 2 - (minY + maxY) / 2 * zoom };
 }

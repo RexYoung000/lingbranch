@@ -1,3 +1,4 @@
+import {MIN_CANVAS_ZOOM} from "../shared/relationship-layout.mjs";
 import { z } from 'zod';
 import { sha256 as digestBytes } from '@noble/hashes/sha2.js';
 
@@ -27,9 +28,11 @@ export const noteFields = {
   title:z.string().trim().min(1).max(200), body:z.string().max(50000),
   sourceLabel:z.string().trim().max(200), sourceUrl, sourceAt:z.string().trim().max(100), tags,
 };
-export const patch = z.object({...noteFields, x:coordinate, y:coordinate, archived:z.boolean()}).partial().strict().refine(value => Object.keys(value).length > 0, '至少提供一个字段');
+// bodyFormat 保持可选且无默认：旧请求不新增字段，标准化输入与已保存 receipt 的请求摘要保持不变。
+export const bodyFormat = z.enum(['plain', 'markdown']);
+export const patch = z.object({...noteFields, bodyFormat, x:coordinate, y:coordinate, archived:z.boolean()}).partial().strict().refine(value => Object.keys(value).length > 0, '至少提供一个字段');
 export const create = z.object({
-  title:noteFields.title, body:noteFields.body.default(''), sourceLabel:noteFields.sourceLabel.default(''),
+  title:noteFields.title, body:noteFields.body.default(''), bodyFormat:bodyFormat.optional(), sourceLabel:noteFields.sourceLabel.default(''),
   sourceUrl:sourceUrl.default(''), sourceAt:noteFields.sourceAt.default(''), tags:tags.default([]),
   x:coordinate.default(120), y:coordinate.default(120), idempotencyKey:key,
 }).strict();
@@ -42,7 +45,7 @@ export const attachmentInput = z.object({
   bytes:z.number().int().min(1).max(MAX_ATTACHMENT_BYTES), sha256:digest,
   indexedText:z.string().max(100000).default(''), idempotencyKey:key,
 }).strict();
-export const canvas = z.object({panX:coordinate, panY:coordinate, zoom:z.number().min(.05).max(2.5), expectedUpdatedAt:date, idempotencyKey:key}).strict();
+export const canvas = z.object({panX:coordinate, panY:coordinate, zoom:z.number().min(MIN_CANVAS_ZOOM).max(2.5), expectedUpdatedAt:date, idempotencyKey:key}).strict();
 export const rename = z.object({fromTag:tag, toTag:tag, idempotencyKey:key}).strict();
 export const removeTag = z.object({tag, idempotencyKey:key}).strict();
 export function canonical(value) {

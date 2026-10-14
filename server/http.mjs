@@ -36,6 +36,21 @@ async function jsonBody(req,limit=150000) {
 function requireFields(value,keys) {
   return v.parse(z.object(Object.fromEntries(keys.map(k => [k,v.id]))).strict(),value);
 }
+function parseByteRange(header,size) {
+  const match=/^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if(!match||(!match[1]&&!match[2]))return {kind:'ignore'};
+  let start,end;
+  if(!match[1]){
+    const suffix=Number(match[2]);
+    if(!Number.isSafeInteger(suffix)||suffix<=0)return {kind:'unsatisfiable'};
+    start=Math.max(0,size-suffix);end=size-1;
+  }else{
+    start=Number(match[1]);end=match[2]?Number(match[2]):size-1;
+    if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||start>=size)return {kind:'unsatisfiable'};
+    end=Math.min(end,size-1);
+  }
+  return {kind:'range',start,end};
+}
 
 export async function createApplication(config,{dev=false} = {}) {
   if (dev && config.mode !== 'local') throw new Error('开发模式仅可用于本机回环地址。');
@@ -125,7 +140,8 @@ export async function createApplication(config,{dev=false} = {}) {
       }
       if (path === '/api/connections') {
         if (req.method === 'POST') return sendJson(res,200,library.connect(await jsonBody(req)).connection);
-        if (req.method === 'DELETE') { const input = requireFields(await jsonBody(req),['id']); return sendJson(res,200,library.removeConnection(input.id)); }
+        if (req.method === 'PATCH') return sendJson(res,200,library.updateConnection(await jsonBody(req)));
+        if (req.method === 'DELETE') { const input = v.parse(z.object({id:v.id,expectedUpdatedAt:v.date.optional()}).strict(),await jsonBody(req)); return sendJson(res,200,library.removeConnection(input.id,input.expectedUpdatedAt)); }
       }
       const uploadMatch = path.match(/^\/api\/ideas\/([^/]+)\/attachments$/);
       if (uploadMatch && req.method === 'POST') {
@@ -136,7 +152,9 @@ export async function createApplication(config,{dev=false} = {}) {
         catch { v.fail('invalid_input','附件表单无效。'); }
         const file = form.get('file');
         if (!(file instanceof File)) v.fail('invalid_input','请选择文件。');
-        const result = await library.addAttachment({id:uploadMatch[1],name:file.name,mimeType:file.type || 'application/octet-stream',bytes:file.size,
+        const fallbackMimeType = file.type || 'application/octet-stream';
+        const mimeType = file.name.toLowerCase().endsWith('.mp4') && (!file.type || file.type === 'application/octet-stream') ? 'video/mp4' : fallbackMimeType;
+        const result = await library.addAttachment({id:uploadMatch[1],name:file.name,mimeType,bytes:file.size,
           sha256:form.get('sha256'),indexedText:form.get('indexedText') || '',idempotencyKey:form.get('idempotencyKey')},Buffer.from(await file.arrayBuffer()));
         return sendJson(res,result.replayed ? 200 : 201,result);
       }
@@ -144,9 +162,29 @@ export async function createApplication(config,{dev=false} = {}) {
       if (fileMatch && req.method === 'GET') {
         const {metadata,bytes} = await library.readAttachment(fileMatch[1]);
         const image = /^image\/(png|jpeg|gif|webp)$/.test(metadata.mimeType);
-        res.setHeader('Content-Type',image ? metadata.mimeType : 'application/octet-stream');
-        res.setHeader('Content-Disposition',`${image && !url.searchParams.has('download') ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(metadata.name).replace(/'/g,'%27')}`);
+        const video = metadata.mimeType === 'video/mp4';
+        const previewable = image || video;
+        res.setHeader('Content-Type',previewable ? metadata.mimeType : 'application/octet-stream');
+        res.setHeader('Content-Disposition',`${previewable && !url.searchParams.has('download') ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(metadata.name).replace(/'/g,'%27')}`);
         res.setHeader('Content-Security-Policy',"sandbox; default-src 'none'");
+        res.setHeader('Content-Length',bytes.length);
+        if(video){
+          res.setHeader('Accept-Ranges','bytes');
+          const rangeHeader=req.headers.range;
+          if(rangeHeader){
+            const range=parseByteRange(rangeHeader,bytes.length);
+            if(range.kind==='unsatisfiable'){
+              res.setHeader('Content-Range',`bytes */${bytes.length}`);
+              res.writeHead(416);return res.end();
+            }
+            if(range.kind==='range'){
+              const part=bytes.subarray(range.start,range.end+1);
+              res.setHeader('Content-Range',`bytes ${range.start}-${range.end}/${bytes.length}`);
+              res.setHeader('Content-Length',part.length);
+              res.writeHead(206);return res.end(part);
+            }
+          }
+        }
         res.writeHead(200); return res.end(bytes);
       }
       if (path === '/api/export' && req.method === 'GET') {

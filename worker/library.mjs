@@ -1,22 +1,23 @@
 import { z } from 'zod';
 import * as v from '../server/validation.mjs';
 import { encodeCursor, decodeCursor } from '../server/encoding.mjs';
+import * as md from '../server/markdown.mjs';
+import { freeNodePosition } from '../shared/relationship-layout.mjs';
+import { layoutSchema } from '../shared/layout-request.mjs';
+import { connectionFromRow, connectionCreateSchema, connectionUpdateSchema } from '../shared/connection-model.mjs';
 
 const epoch='1970-01-01T00:00:00.000Z';
 const nextDate=previous=>new Date(Math.max(Date.now(),Date.parse(previous||epoch)+1)).toISOString();
-const cardWidth=324,cardHeight=420;
 function freePosition(preferred,occupied) {
-  const dx=preferred.x>1_000_000-3*cardWidth?-1:1,dy=preferred.y>0?-1:1;
-  for(let n=0;n<=occupied.length*9+4;n++) {
-    const p={x:preferred.x+dx*(n%4)*cardWidth,y:preferred.y+dy*Math.floor(n/4)*cardHeight};
-    if(Math.abs(p.x)<=1_000_000&&Math.abs(p.y)<=1_000_000&&!occupied.some(o=>Math.abs(p.x-o.x)<cardWidth&&Math.abs(p.y-o.y)<cardHeight))return p;
-  }
-  v.fail('conflict','附近没有空位，请选择另一个位置。',409);
+  try {return freeNodePosition(preferred,occupied);}catch {v.fail('conflict','附近没有空位，请选择另一个位置。',409);}
 }
 const attachmentFrom=r=>({id:r.id,ideaId:r.idea_id,name:r.name,mimeType:r.mime_type,bytes:r.bytes,indexedText:r.indexed_text,sha256:r.sha256,createdAt:r.created_at});
-const ideaFrom=(r,files=[])=>({id:r.id,title:r.title,body:r.body,sourceLabel:r.source_label,sourceUrl:r.source_url,sourceAt:r.source_at,tags:JSON.parse(r.tags_json),x:r.x,y:r.y,archived:!!r.archived,createdAt:r.created_at,updatedAt:r.updated_at,attachments:files.filter(f=>f.idea_id===r.id).map(attachmentFrom)});
+const ideaFrom=(r,files=[])=>{
+  const attachments=files.filter(f=>f.idea_id===r.id).map(attachmentFrom),bodyFormat=md.normalizeFormat(r.body_format);
+  return {id:r.id,title:r.title,body:r.body,bodyFormat,summary:md.readableSummary(r.body,bodyFormat),bodyImages:bodyFormat==='markdown'?md.resolveBodyImages(r.body,attachments):[],sourceLabel:r.source_label,sourceUrl:r.source_url,sourceAt:r.source_at,tags:JSON.parse(r.tags_json),x:r.x,y:r.y,archived:!!r.archived,createdAt:r.created_at,updatedAt:r.updated_at,attachments};
+};
 const canvasFrom=r=>({panX:r.pan_x,panY:r.pan_y,zoom:r.zoom,updatedAt:r.updated_at});
-const connectionFrom=r=>({id:r.id,fromId:r.from_id,toId:r.to_id});
+const connectionFrom=connectionFromRow;
 
 export class D1Library {
   constructor(env) {if(!env.DB||!env.BUCKET)v.fail('unavailable','资料存储尚未就绪，请稍后重试。',503);this.db=env.DB;this.bucket=env.BUCKET;}
@@ -29,7 +30,7 @@ export class D1Library {
     if(!row)return {hash};
     if(row.hash!==hash)v.fail('conflict','该重试标识已用于不同操作或内容，请读取已保存结果。',409);
     const result=JSON.parse(row.result);
-    return {hash,result:{...result,replayed:true,outcome:result.outcome==='created'?(kind==='attachment'?'already_attached':'already_saved'):result.outcome}};
+    return {hash,result:{...result,replayed:true,outcome:result.outcome==='created'?(kind==='attachment'?'already_attached':kind==='connection-create'?'already_connected':'already_saved'):result.outcome}};
   }
   async mutate(kind,input,plan) {
     await this.ensure();
@@ -75,9 +76,10 @@ export class D1Library {
   async createIdea(value) {
     const input=v.parse(v.create,value);
     return this.mutate('create',input,async()=>{
-      const position=freePosition(input,await this.rows('SELECT x,y FROM ideas')),now=nextDate(),id=crypto.randomUUID();
-      const item={id,...Object.fromEntries(Object.keys(v.noteFields).map(k=>[k,input[k]])),...position,archived:false,createdAt:now,updatedAt:now,attachments:[]};
-      return {statements:[this.statement('INSERT INTO ideas(id,title,body,source_label,source_url,source_at,tags_json,x,y,archived,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,0,?,?)',id,input.title,input.body,input.sourceLabel,input.sourceUrl,input.sourceAt,JSON.stringify(input.tags),position.x,position.y,now,now)],result:{outcome:'created',item}};
+      const position=freePosition(input,await this.rows('SELECT x,y,title FROM ideas')),now=nextDate(),id=crypto.randomUUID(),bodyFormat=md.normalizeFormat(input.bodyFormat);
+      if(bodyFormat==='markdown')md.resolveBodyImages(input.body,[]);
+      const item={id,...Object.fromEntries(Object.keys(v.noteFields).map(k=>[k,input[k]])),bodyFormat,summary:md.readableSummary(input.body,bodyFormat),bodyImages:[],...position,archived:false,createdAt:now,updatedAt:now,attachments:[]};
+      return {statements:[this.statement('INSERT INTO ideas(id,title,body,body_format,source_label,source_url,source_at,tags_json,x,y,archived,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)',id,input.title,input.body,bodyFormat,input.sourceLabel,input.sourceUrl,input.sourceAt,JSON.stringify(input.tags),position.x,position.y,now,now)],result:{outcome:'created',item}};
     });
   }
   async updateIdea(value) {
@@ -87,7 +89,22 @@ export class D1Library {
       if(input.expectedUpdatedAt!==current.updatedAt)v.fail('conflict','灵感已被修改。草稿已保留，请重新读取并核对后保存。',409);
       if(!Object.entries(input.patch).some(([k,x])=>v.fingerprint(x)!==v.fingerprint(current[k])))return {result:{outcome:'unchanged',item:current}};
       const item={...current,...input.patch,updatedAt:nextDate(current.updatedAt)};
-      return {statements:[this.statement('UPDATE ideas SET title=?,body=?,source_label=?,source_url=?,source_at=?,tags_json=?,x=?,y=?,archived=?,updated_at=? WHERE id=?',item.title,item.body,item.sourceLabel,item.sourceUrl,item.sourceAt,JSON.stringify(item.tags),item.x,item.y,Number(item.archived),item.updatedAt,input.id)],result:{outcome:'updated',item}};
+      item.bodyFormat=md.normalizeFormat(item.bodyFormat);item.summary=md.readableSummary(item.body,item.bodyFormat);item.bodyImages=item.bodyFormat==='markdown'?md.resolveBodyImages(item.body,item.attachments):[];
+      return {statements:[this.statement('UPDATE ideas SET title=?,body=?,body_format=?,source_label=?,source_url=?,source_at=?,tags_json=?,x=?,y=?,archived=?,updated_at=? WHERE id=?',item.title,item.body,item.bodyFormat,item.sourceLabel,item.sourceUrl,item.sourceAt,JSON.stringify(item.tags),item.x,item.y,Number(item.archived),item.updatedAt,input.id)],result:{outcome:'updated',item}};
+    });
+  }
+  async arrangeIdeas(value) {
+    const input=v.parse(layoutSchema,value);
+    return this.mutate('layout',input,async()=>{
+      const rows=await this.rows('SELECT id,x,y,updated_at FROM ideas'),byId=new Map(rows.map(row=>[row.id,row]));
+      const current=input.positions.map(point=>{
+        const row=byId.get(point.id);if(!row)v.fail('not_found','整理中的灵感不存在。',404);
+        if(row.updated_at!==point.expectedUpdatedAt)v.fail('conflict','灵感已被修改，整批位置未保存。请刷新后重新整理。',409);return row;
+      });
+      const positions=input.positions.map((point,index)=>({id:point.id,x:point.x,y:point.y,updatedAt:current[index].x!==point.x||current[index].y!==point.y?nextDate(current[index].updated_at):current[index].updated_at}));
+      const changed=positions.filter((point,index)=>point.updatedAt!==current[index].updated_at);
+      const statements=changed.length?[this.statement(`WITH updates AS (SELECT json_extract(value,'$.id') id,json_extract(value,'$.x') x,json_extract(value,'$.y') y,json_extract(value,'$.updatedAt') updated_at FROM json_each(?)) UPDATE ideas SET x=(SELECT x FROM updates WHERE updates.id=ideas.id),y=(SELECT y FROM updates WHERE updates.id=ideas.id),updated_at=(SELECT updated_at FROM updates WHERE updates.id=ideas.id) WHERE id IN (SELECT id FROM updates)`,JSON.stringify(changed))]:[];
+      return {statements,result:{outcome:changed.length?'updated':'unchanged',positions,previous:current.map((row,index)=>({id:row.id,x:row.x,y:row.y,expectedUpdatedAt:positions[index].updatedAt}))}};
     });
   }
   async listIdeas(value={}) {
@@ -104,7 +121,7 @@ export class D1Library {
     const matching=s.ideas.filter(r=>{
       if(r.seq>high||(!input.includeArchived&&r.archived))return false;
       const tags=JSON.parse(r.tags_json);if(input.tag&&!tags.includes(input.tag))return false;
-      const files=s.attachments.filter(f=>f.idea_id===r.id),text=[r.title,r.body,r.source_label,r.source_url,...tags,...files.flatMap(f=>[f.name,f.indexed_text])].join(' ').toLocaleLowerCase();
+      const files=s.attachments.filter(f=>f.idea_id===r.id),bodyText=md.readableSummary(r.body,md.normalizeFormat(r.body_format),1_000_000),text=[r.title,bodyText,r.source_label,r.source_url,...tags,...files.flatMap(f=>[f.name,f.indexed_text])].join(' ').toLocaleLowerCase();
       return terms.every(term=>text.includes(term));
     });
     const remaining=matching.filter(r=>r.seq>after),selected=remaining.slice(0,input.limit),hasMore=remaining.length>input.limit;
@@ -132,20 +149,36 @@ export class D1Library {
     });
   }
   async connect(value) {
-    const input=v.parse(z.object({fromId:v.id,toId:v.id}).strict(),value);
-    if(input.fromId===input.toId)v.fail('invalid_input','请选择两条不同的灵感。');
-    return this.mutate('connect',input,async()=>{
-      if((await this.readIdea(input.fromId)).archived||(await this.readIdea(input.toId)).archived)v.fail('invalid_input','只能连接未归档灵感。');
-      const [fromId,toId]=[input.fromId,input.toId].sort(),existing=await this.first('SELECT * FROM connections WHERE from_id=? AND to_id=?',fromId,toId);
-      if(existing)return {result:{outcome:'already_connected',connection:connectionFrom(existing)}};
-      const connection={id:crypto.randomUUID(),fromId,toId};
-      return {statements:[this.statement('INSERT INTO connections(id,from_id,to_id) VALUES(?,?,?)',connection.id,fromId,toId)],result:{outcome:'created',connection}};
+    const parsed=v.parse(connectionCreateSchema,value);
+    if(parsed.fromId===parsed.toId)v.fail('invalid_input','请选择两条不同的灵感。');
+    const [fromId,toId]=[parsed.fromId,parsed.toId].sort(),input={...parsed,fromId,toId};
+    return this.mutate(input.idempotencyKey?'connection-create':'connect',input,async()=>{
+      if((await this.readIdea(fromId)).archived||(await this.readIdea(toId)).archived)v.fail('invalid_input','只能连接未归档灵感。');
+      const existing=await this.first('SELECT * FROM connections WHERE from_id=? AND to_id=?',fromId,toId);
+      if(existing){const connection=connectionFrom(existing);if(input.relationType!==undefined&&input.relationType!==connection.relationType||input.reason!==undefined&&input.reason!==connection.reason)v.fail('conflict','关联已存在且说明不同，请读取其版本后修改说明。',409);return {result:{outcome:'already_connected',connection}};}
+      const connection={id:crypto.randomUUID(),fromId,toId,relationType:input.relationType??'related',reason:input.reason??'',updatedAt:nextDate()};
+      return {statements:[this.statement('INSERT INTO connections(id,from_id,to_id,relation_type,reason,updated_at) VALUES(?,?,?,?,?,?)',connection.id,fromId,toId,connection.relationType,connection.reason,connection.updatedAt)],result:{outcome:'created',connection}};
+    });
+  }
+  async readConnection(value) {const id=v.parse(v.id,value),row=await this.first('SELECT * FROM connections WHERE id=?',id);if(!row)v.fail('not_found','没有找到这条关联。',404);return connectionFrom(row);}
+  async updateConnection(value) {
+    const input=v.parse(connectionUpdateSchema,value);
+    return this.mutate('connection-update',input,async()=>{
+      const current=await this.readConnection(input.connectionId);if(current.updatedAt!==input.expectedUpdatedAt)v.fail('conflict','关系说明已被其他入口修改，请重新读取后对比。',409);
+      const next={...current,...input.patch};if(next.relationType===current.relationType&&next.reason===current.reason)return {result:{outcome:'unchanged',connection:current}};
+      next.updatedAt=nextDate(current.updatedAt);
+      return {statements:[this.statement('UPDATE connections SET relation_type=?,reason=?,updated_at=? WHERE id=?',next.relationType,next.reason,next.updatedAt,next.id)],result:{outcome:'updated',connection:next}};
     });
   }
   async listConnections(id) {await this.readIdea(id);return (await this.rows('SELECT * FROM connections WHERE from_id=? OR to_id=? ORDER BY id',id,id)).map(connectionFrom);}
-  async removeConnection(value) {
+  async removeConnection(value,expectedUpdatedAt) {
     const id=v.parse(v.id,value);
-    return this.mutate('remove_connection',{id},async()=>({statements:[this.statement('DELETE FROM connections WHERE id=?',id)],result:{outcome:(await this.first('SELECT id FROM connections WHERE id=?',id))?'removed':'unchanged',connectionId:id}}));
+    if(expectedUpdatedAt!==undefined)v.parse(v.date,expectedUpdatedAt);
+    return this.mutate('remove_connection',{id},async()=>{
+      const row=await this.first('SELECT * FROM connections WHERE id=?',id);if(!row)return {result:{outcome:'unchanged',connectionId:id}};
+      if(expectedUpdatedAt!==undefined&&row.updated_at!==expectedUpdatedAt)v.fail('conflict','关系说明已更新，请读取最新版本后再移除。',409);
+      return {statements:[this.statement('DELETE FROM connections WHERE id=?',id)],result:{outcome:'removed',connectionId:id}};
+    });
   }
   async saveCanvas(value) {
     const input=v.parse(v.canvas,value);
@@ -183,7 +216,8 @@ export class D1Library {
 export function validateFile(metadata,bytes) {
   if(!(bytes instanceof Uint8Array)||!bytes.length||bytes.length!==metadata.bytes||v.sha256(bytes)!==metadata.sha256)v.fail('integrity_error','附件字节数或 SHA-256 校验不一致。');
   const signature=bytes.subarray(0,16),ascii=new TextDecoder('ascii').decode(signature),type=metadata.mimeType;
-  const tests={'image/png':()=>[137,80,78,71,13,10,26,10].every((x,i)=>signature[i]===x),'image/jpeg':()=>signature[0]===255&&signature[1]===216&&signature[2]===255,'image/gif':()=>/^GIF8[79]a/.test(ascii),'image/webp':()=>ascii.startsWith('RIFF')&&ascii.slice(8,12)==='WEBP','application/pdf':()=>ascii.startsWith('%PDF-')};
+  const mp4Signature=()=>{if(bytes.length<16||ascii.slice(4,8)!=='ftyp')return false;const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),boxSize=view.getUint32(0);return boxSize===1?bytes.length>=24&&view.getBigUint64(8)>=24n&&view.getBigUint64(8)<=BigInt(bytes.length):boxSize>=16&&boxSize<=bytes.length;};
+  const tests={'image/png':()=>[137,80,78,71,13,10,26,10].every((x,i)=>signature[i]===x),'image/jpeg':()=>signature[0]===255&&signature[1]===216&&signature[2]===255,'image/gif':()=>/^GIF8[79]a/.test(ascii),'image/webp':()=>ascii.startsWith('RIFF')&&ascii.slice(8,12)==='WEBP','video/mp4':mp4Signature,'application/pdf':()=>ascii.startsWith('%PDF-')};
   if(tests[type]&&!tests[type]())v.fail('invalid_input','文件内容与声明的类型不一致。');
   if(type.startsWith('text/')||type==='application/json')try {new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch {v.fail('invalid_input','文本附件需要使用 UTF-8 编码。');}
 }

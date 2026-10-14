@@ -4,13 +4,14 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { executeTool,toolDefinitions } from '../server/tools.mjs';
 import { LibraryError } from '../server/validation.mjs';
+import packageMetadata from '../package.json' with {type:'json'};
 
 export async function handleMcp(request,library,authenticated,message) {
   if(request.method!=='POST')return new Response('Use stateless POST /mcp',{status:405,headers:{Allow:'POST'}});
   if(!authenticated&&message?.method!=='initialize'&&message?.method!=='tools/list'&&message?.method!=='notifications/initialized') {
     return Response.json({jsonrpc:'2.0',id:message?.id??null,error:{code:-32001,message:'Authentication required'}},{status:401});
   }
-  const server=new Server({name:'lingbranch',version:'0.2.0'},{capabilities:{tools:{}}});
+  const server=new Server({name:'lingbranch',version:packageMetadata.version},{capabilities:{tools:{}}});
   server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:Object.entries(toolDefinitions).map(([name,tool])=>({name,description:tool.description,inputSchema:zodToJsonSchema(tool.schema,{$refStrategy:'none'}),annotations:{readOnlyHint:!!tool.readOnly,destructiveHint:name.startsWith('remove_'),idempotentHint:true,openWorldHint:false}}))}));
   server.setRequestHandler(CallToolRequestSchema,async call=>{
     try {

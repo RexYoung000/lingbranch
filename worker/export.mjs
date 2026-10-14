@@ -2,7 +2,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { base64Chunks } from '../server/encoding.mjs';
 import * as v from '../server/validation.mjs';
 
-// Preserve the version-1 local restore format without materializing all R2 files in memory.
+// Preserve the current local restore format without materializing all R2 files in memory.
 export async function exportBundle(library) {
   const snapshot=await library.snapshot(),encoder=new TextEncoder();
   const snapshotJson=JSON.stringify(v.canonical(snapshot));
@@ -23,7 +23,7 @@ export async function exportBundle(library) {
   for await(const chunk of payload())hasher.update(encoder.encode(chunk));
   const digest=Array.from(hasher.digest(),b=>b.toString(16).padStart(2,'0')).join('');
   async function* document() {
-    yield `{"format":"lingbranch","version":1,"sha256":"${digest}","payload":`;
+    yield `{"format":"lingbranch","version":3,"sha256":"${digest}","payload":`;
     yield* payload();yield '}';
   }
   const iterator=document();

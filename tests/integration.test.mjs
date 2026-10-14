@@ -18,6 +18,7 @@ import { restoreBundle, validateBundle } from '../server/bundle.mjs';
 
 const execFile = promisify(execFileCallback);
 const key = () => randomUUID();
+const mp4Fixture = () => Buffer.concat([Buffer.from([0,0,0,20]),Buffer.from('ftypisom'),Buffer.from([0,0,0,0]),Buffer.from('isom')]);
 async function fixture(t,mode='local') {
   const directory = await mkdtemp(join(tmpdir(),'lingbranch-test-'));
   const config = {mode,port:0,host:'127.0.0.1',origin:'http://127.0.0.1:0',dataDir:join(directory,'library'),token:randomUUID()};
@@ -58,11 +59,11 @@ test('HTTP 空库 → 两条灵感 → 检索连线 → 独立 stdio MCP 更新 
   assert.equal((await f.request('/api/atlas')).value.ideas.length,0);
   const first=await create(f,'阅读记录',{body:'关于公园的笔记',sourceLabel:'自行编写示例',sourceUrl:'https://example.com/article',sourceAt:'2026-10-04',tags:['阅读']});
   const second=await create(f,'散步想法',{x:120,y:120});
-  assert.ok(Math.abs(first.x-second.x)>=324||Math.abs(first.y-second.y)>=420);
+  assert.ok(Math.abs(first.x-second.x)>=200||Math.abs(first.y-second.y)>=88);
   const found=await f.request('/api/list?query=公园');assert.equal(found.value.items[0].id,first.id);
   const connection=await f.request('/api/connections',{method:'POST',body:{fromId:first.id,toId:second.id}});assert.equal(connection.response.status,200);
   const ai=await mcp(t,f.config.dataDir);
-  const tools=await ai.client.listTools();assert.equal(tools.tools.length,13);assert.ok(tools.tools.every(tool=>tool.inputSchema.type==='object'));
+  const tools=await ai.client.listTools();assert.equal(tools.tools.length,15);assert.ok(tools.tools.every(tool=>tool.inputSchema.type==='object'));
   const read=await ai.call('read_inspiration',{id:first.id});assert.equal(read.body,first.body);
   const changed=await ai.call('update_inspiration',{id:first.id,expectedUpdatedAt:read.updatedAt,patch:{body:'由 MCP 补充的公园观察',tags:['阅读','观察']},idempotencyKey:key()});
   assert.equal(changed.outcome,'updated');assert.equal(changed.isError,false);
@@ -101,7 +102,7 @@ test('跨进程并发新建避开旧位置；重复请求原子去重',async t =
   assert.equal(results[0].item.id,results[1].value.id);
   await Promise.all(Array.from({length:20},(_,i)=>i%2?ai.call('create_inspiration',{title:`并发 ${i}`,x:-200,y:-100,idempotencyKey:key()}):create(f,`并发 ${i}`,{x:-200,y:-100})));
   const ideas=(await f.request('/api/atlas')).value.ideas;assert.equal(ideas.length,22);
-  for(let i=0;i<ideas.length;i++)for(let j=i+1;j<ideas.length;j++)assert.ok(Math.abs(ideas[i].x-ideas[j].x)>=324||Math.abs(ideas[i].y-ideas[j].y)>=420);
+  for(let i=0;i<ideas.length;i++)for(let j=i+1;j<ideas.length;j++)assert.ok(Math.abs(ideas[i].x-ideas[j].x)>=200||Math.abs(ideas[i].y-ideas[j].y)>=88);
   assert.equal(ideas.find(x=>x.id===old.id).x,-200);assert.equal(ideas.find(x=>x.id===old.id).y,-100);
 });
 
@@ -166,9 +167,51 @@ test('附件 SHA 与类型验证、重复上传、数据库失败后重试、损
   assert.equal((await f.request(`/api/ideas/${a.id}`)).value.attachments.length,2);
 });
 
+test('MP4 附件校验、原生预览、字节范围定位与原件下载',async t => {
+  const f=await fixture(t),a=await create(f,'MP4 交互参考'),bytes=mp4Fixture(),idempotencyKey=key();
+  const fields={name:'interaction.mp4',mimeType:'video/mp4',idempotencyKey};
+  const saved=await upload(f,a.id,bytes,fields);assert.equal(saved.response.status,201,JSON.stringify(saved.value));
+  const repeated=await upload(f,a.id,bytes,fields);assert.equal(repeated.response.status,200);assert.equal(repeated.value.attachment.id,saved.value.attachment.id);
+  const idea=(await f.request(`/api/ideas/${a.id}`)).value;assert.equal(idea.attachments[0].mimeType,'video/mp4');
+
+  const url=`${f.config.origin}/api/attachments/${saved.value.attachment.id}`;
+  const preview=await fetch(url);assert.equal(preview.status,200);assert.equal(preview.headers.get('content-type'),'video/mp4');
+  assert.match(preview.headers.get('content-disposition'),/^inline/);assert.equal(preview.headers.get('accept-ranges'),'bytes');
+  assert.deepEqual(Buffer.from(await preview.arrayBuffer()),bytes);
+
+  const range=await fetch(url,{headers:{Range:'bytes=4-7'}});assert.equal(range.status,206);
+  assert.equal(range.headers.get('content-range'),`bytes 4-7/${bytes.length}`);assert.deepEqual(Buffer.from(await range.arrayBuffer()),Buffer.from('ftyp'));
+  const suffix=await fetch(url,{headers:{Range:'bytes=-4'}});assert.equal(suffix.status,206);
+  assert.equal(suffix.headers.get('content-range'),`bytes 16-19/${bytes.length}`);assert.deepEqual(Buffer.from(await suffix.arrayBuffer()),Buffer.from('isom'));
+  const unsatisfiable=await fetch(url,{headers:{Range:`bytes=${bytes.length}-`}});assert.equal(unsatisfiable.status,416);
+  assert.equal(unsatisfiable.headers.get('content-range'),`bytes */${bytes.length}`);
+
+  const downloaded=await fetch(`${url}?download=1`);assert.equal(downloaded.status,200);assert.match(downloaded.headers.get('content-disposition'),/^attachment/);
+  assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()),bytes);
+  const invalid=await upload(f,a.id,Buffer.from('not an MP4'),{name:'invalid.mp4',mimeType:'video/mp4'});assert.equal(invalid.response.status,400);
+});
+
+test('网页浏览器未提供 MP4 MIME 时按扩展名识别，并仍强制校验容器签名',async t => {
+  const f=await fixture(t),a=await create(f,'未识别 MIME 的 MP4'),bytes=mp4Fixture();
+  const saved=await upload(f,a.id,bytes,{name:'unknown-type.mp4',mimeType:'application/octet-stream',indexedText:''});
+  assert.equal(saved.response.status,201,JSON.stringify(saved.value));assert.equal(saved.value.attachment.mimeType,'video/mp4');assert.equal(saved.value.attachment.indexedText,'');
+  const preview=await fetch(`${f.config.origin}/api/attachments/${saved.value.attachment.id}`);assert.equal(preview.headers.get('content-type'),'video/mp4');assert.match(preview.headers.get('content-disposition'),/^inline/);
+  const invalid=await upload(f,a.id,Buffer.from('not an MP4'),{name:'invalid-unknown.mp4',mimeType:'application/octet-stream'});assert.equal(invalid.response.status,400);
+});
+
+test('stdio MCP 保存并分段读回 MP4 附件原件',async t => {
+  const f=await fixture(t),item=await create(f,'MCP 视频附件'),ai=await mcp(t,f.config.dataDir),bytes=mp4Fixture();
+  const saved=await ai.call('attach_inspiration_file',{id:item.id,name:'mcp.mp4',mimeType:'video/mp4',bytes:bytes.length,
+    sha256:sha256(bytes),dataBase64:bytes.toString('base64'),idempotencyKey:key()});
+  assert.equal(saved.isError,false);assert.equal(saved.attachment.mimeType,'video/mp4');
+  const read=await ai.call('read_inspiration_attachment',{attachmentId:saved.attachment.id});
+  assert.equal(read.isError,false);assert.equal(read.complete,true);assert.deepEqual(Buffer.from(read.dataBase64,'base64'),bytes);
+});
+
 test('完整导出、CLI 恢复到新目录、错误包与已有目标保护',async t => {
   const f=await fixture(t),a=await create(f,'导出 A',{tags:['资料'],sourceUrl:'https://example.com'}),b=await create(f,'导出 B');
   const bytes=Buffer.from('original export bytes'),file=await upload(f,a.id,bytes);
+  const videoBytes=mp4Fixture(),video=await upload(f,a.id,videoBytes,{name:'archive.mp4',mimeType:'video/mp4'});assert.equal(video.response.status,201);
   await f.request('/api/connections',{method:'POST',body:{fromId:a.id,toId:b.id}});
   const canvas=(await f.request('/api/atlas')).value.canvas;
   await f.request('/api/canvas',{method:'PATCH',body:{panX:150,panY:-350,zoom:.65,expectedUpdatedAt:canvas.updatedAt,idempotencyKey:key()}});
@@ -177,7 +220,7 @@ test('完整导出、CLI 恢复到新目录、错误包与已有目标保护',as
   assert.deepEqual(f.app.library.snapshot(),before);
   const path=join(f.directory,'backup.lingbranch.json.gz'),target=join(f.directory,'restored');await writeFile(path,bundle);
   const restored=await execFile(process.execPath,['server/backup.mjs','restore',path,target],{cwd:projectRoot});assert.equal(JSON.parse(restored.stdout).ideas,2);
-  const db=new Library(target);try {assert.deepEqual(db.snapshot(),before);assert.deepEqual((await db.readAttachment(file.value.attachment.id)).bytes,bytes);}finally{db.close();}
+  const db=new Library(target);try {assert.deepEqual(db.snapshot(),before);assert.deepEqual((await db.readAttachment(file.value.attachment.id)).bytes,bytes);assert.deepEqual((await db.readAttachment(video.value.attachment.id)).bytes,videoBytes);}finally{db.close();}
   await assert.rejects(restoreBundle(bundle,target),error=>error.code==='target_exists');
   const empty=join(f.directory,'existing-empty');await mkdir(empty);await assert.rejects(restoreBundle(bundle,empty),error=>error.code==='target_exists');
   const object=JSON.parse(gunzipSync(bundle));object.payload.snapshot.connections[0].from_id=randomUUID();object.sha256=fingerprint(object.payload);

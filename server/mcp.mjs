@@ -6,9 +6,10 @@ import { Library } from './library.mjs';
 import { dataDirectory } from './config.mjs';
 import { executeTool, toolDefinitions } from './tools.mjs';
 import { LibraryError } from './validation.mjs';
+import packageInfo from '../package.json' with { type: 'json' };
 
 const library = new Library(dataDirectory());
-const server = new Server({name:'lingbranch',version:'0.1.0'}, {capabilities:{tools:{}}});
+const server = new Server({name:'lingbranch',version:packageInfo.version}, {capabilities:{tools:{}}});
 server.setRequestHandler(ListToolsRequestSchema,async() => ({tools:Object.entries(toolDefinitions).map(([name,tool]) => ({
   name, description:tool.description, inputSchema:zodToJsonSchema(tool.schema,{$refStrategy:'none'}),
   annotations:{readOnlyHint:!!tool.readOnly,destructiveHint:name.startsWith('remove_'),idempotentHint:true,openWorldHint:false},
